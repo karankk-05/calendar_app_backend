@@ -2,10 +2,9 @@ import os
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional
-from datetime import date, time
+from datetime import date, time, datetime
 from pymongo import MongoClient
 from bson.objectid import ObjectId
-from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -39,6 +38,10 @@ class SlotsResponse(BaseModel):
     date: date
     total_slots: int
     available_slots: int
+class SlotsResponseDaily(BaseModel):
+    date: date
+    total_slots: int
+    available_slots: int
     slots: List[Slot]
 
 class AddUpdateSlotRequest(BaseModel):
@@ -52,6 +55,7 @@ class RemoveSlotRequest(BaseModel):
     slot: Slot
 
 # Helper functions
+# Helper functions
 def fetch_slots(user_id: str, start_date: date, end_date: Optional[date] = None):
     # Convert dates to datetime for MongoDB compatibility
     start_datetime = datetime.combine(start_date, datetime.min.time())
@@ -61,25 +65,68 @@ def fetch_slots(user_id: str, start_date: date, end_date: Optional[date] = None)
         end_datetime = datetime.combine(end_date, datetime.min.time())
         query["date"]["$lte"] = end_datetime
 
-    # Query MongoDB
-    results = list(slots_collection.find(query))
+    # Query MongoDB with sorting by date
+    results = list(slots_collection.find(query).sort("date", 1))  # Sort by date in ascending order
+    
+    # Return the slots data in a format compatible with SlotsResponse
     return [
         {
-            "date": res["date"].date(),  # Convert datetime back to date
-            "total_slots": 20,          # Assuming a total of 20 slots per day
+            "date": res["date"].date(),  # Convert datetime to date for response
+            "total_slots": 20,  # Assuming a total of 20 slots per day
             "available_slots": 20 - len(res.get("slots", [])),
-            "slots": [
-                {
-                    "start_time": time.fromisoformat(slot["start_time"]),
-                    "end_time": time.fromisoformat(slot["end_time"]),
-                }
-                for slot in res.get("slots", [])
-            ],
+            "slots": sorted(
+                [
+                    {
+                        "start_time": time.fromisoformat(slot["start_time"]),  # Convert string to time
+                        "end_time": time.fromisoformat(slot["end_time"]),  # Convert string to time
+                    }
+                    for slot in res.get("slots", [])
+                ],
+                key=lambda x: x["start_time"],  # Sort slots by start_time
+            ),
         }
         for res in results
     ]
 
 # Routes
+@app.get("/slots/total", response_model=List[SlotsResponse])
+def get_total_slots_per_day(
+    user_id: str,
+    start_date: date,
+    end_date: date
+):
+    """Fetch the total number of slots per day for a date range."""
+    data = fetch_slots(user_id, start_date, end_date)
+    if not data:
+        raise HTTPException(status_code=404, detail="No slots found in the given range.")
+    
+    return [
+        SlotsResponse(
+            date=entry["date"],
+            total_slots=entry["total_slots"],
+            available_slots=entry["available_slots"],
+        )
+        for entry in data
+    ]
+
+@app.get("/slots/details", response_model=SlotsResponseDaily)
+def get_slot_details(
+    user_id: str,
+    date: date
+):
+    """Fetch slot details and timings for a particular date."""
+    data = fetch_slots(user_id, start_date=date, end_date=date)
+    if not data:
+        raise HTTPException(status_code=404, detail="No slots found for the given date.")
+    
+    entry = data[0]  # Since the range is a single date, we return the first entry
+    return SlotsResponseDaily(
+        date=entry["date"],
+        total_slots=entry["total_slots"],
+        available_slots=entry["available_slots"],
+        slots=entry["slots"]
+    )
+
 @app.get("/slots", response_model=List[SlotsResponse])
 def get_slots(user_id: str, start_date: date, end_date: Optional[date] = None):
     """Fetch slot availability for a user within a date range."""
@@ -87,6 +134,7 @@ def get_slots(user_id: str, start_date: date, end_date: Optional[date] = None):
     if not data:
         raise HTTPException(status_code=404, detail="No data found for the given range.")
     return data
+
 
 @app.post("/slot/add")
 def add_slot(request: AddUpdateSlotRequest):
